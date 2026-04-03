@@ -752,24 +752,18 @@ function switchTab(name){
 }
 
 // ════════════════════════════════════════
-//  FIREBASE — BASE DE DATOS
-//  Solo necesitas UNA URL de Firebase
+//  FIREBASE — BASE DE DATOS (TIEMPO REAL)
+//  Solo necesitas UNA URL de Firebase.
+//  SSE mantiene conexión viva: cualquier
+//  cambio llega a TODOS los dispositivos
+//  en menos de 1 segundo automáticamente.
 // ════════════════════════════════════════
 function getFirebaseURL(){
   const raw = localStorage.getItem('rifa_blanca_firebase') || '';
-  return raw.replace(/\/+$/, ''); // quitar slash final
+  return raw.replace(/\/+$/, '');
 }
 
-async function fbRead(){
-  const url = getFirebaseURL();
-  if(!url) return null;
-  try{
-    const res = await fetch(`${url}/rifa.json`);
-    if(!res.ok) return null;
-    return await res.json(); // puede ser null si vacío
-  }catch(e){ return null; }
-}
-
+// ── Escribe objeto completo (usado por admin reset/manual) ──
 async function fbWrite(data){
   const url = getFirebaseURL();
   if(!url) return false;
@@ -783,8 +777,8 @@ async function fbWrite(data){
   }catch(e){ return false; }
 }
 
+// ── Escribe solo los números nuevos sin borrar el resto ──
 async function fbPatchTaken(updates){
-  // Escribe solo los campos nuevos (más eficiente)
   const url = getFirebaseURL();
   if(!url) return false;
   try{
@@ -795,6 +789,17 @@ async function fbPatchTaken(updates){
     });
     return res.ok;
   }catch(e){ return false; }
+}
+
+// ── Lectura directa única (para el botón Actualizar del admin) ──
+async function fbReadOnce(){
+  const url = getFirebaseURL();
+  if(!url) return null;
+  try{
+    const res = await fetch(`${url}/rifa.json`);
+    if(!res.ok) return null;
+    return await res.json();
+  }catch(e){ return null; }
 }
 
 async function testFirebase(){
@@ -820,37 +825,80 @@ async function testFirebase(){
 }
 
 // ════════════════════════════════════════
+//  TIEMPO REAL — Firebase SSE
+//  EventSource = conexión persistente.
+//  Firebase empuja cada cambio en <1 seg
+//  a todos los dispositivos abiertos.
+// ════════════════════════════════════════
+let sseSource = null;
+
+function startRealtimeSync(){
+  const url = getFirebaseURL();
+  if(!url){
+    // Sin Firebase: usar localStorage como fallback
+    try{ taken = JSON.parse(localStorage.getItem('rifa_blanca_taken') || '{}'); }catch(e){}
+    buildGrid();
+    return;
+  }
+
+  if(sseSource){ sseSource.close(); sseSource = null; }
+
+  // Firebase SSE: escucha /rifa/taken en tiempo real
+  sseSource = new EventSource(`${url}/rifa/taken.json`);
+
+  // 'put' = carga inicial completa O reemplazo total
+  sseSource.addEventListener('put', e => {
+    try{
+      const payload = JSON.parse(e.data);
+      if(payload.path === '/'){
+        taken = payload.data || {};
+      } else {
+        // cambio en una sola clave, ej: path="/5"
+        const key = payload.path.replace(/^\//, '');
+        if(payload.data === null) delete taken[key];
+        else taken[key] = payload.data;
+      }
+      try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(e){}
+      buildGrid();
+      if(adminOpen){ renderParticipants(); buildManualGrid(); }
+    }catch(err){}
+  });
+
+  // 'patch' = actualización parcial de varios campos a la vez
+  sseSource.addEventListener('patch', e => {
+    try{
+      const payload = JSON.parse(e.data);
+      Object.entries(payload.data || {}).forEach(([k, v]) => {
+        if(v === null) delete taken[k];
+        else taken[k] = v;
+      });
+      try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(e){}
+      buildGrid();
+      if(adminOpen){ renderParticipants(); buildManualGrid(); }
+    }catch(err){}
+  });
+  // Si se cae la conexión, EventSource la reconecta solo
+}
+
+// ════════════════════════════════════════
 //  CARGA INICIAL
 // ════════════════════════════════════════
-async function init(){
-  await loadTaken();
-  buildGrid();
-  startPolling();
+function init(){
+  // SSE se suscribe y su primer evento 'put' ya carga los datos
+  // y llama buildGrid() solo. No necesitamos esperar un fetch previo.
+  startRealtimeSync();
   initJerseyImage();
 }
 
+// Para el botón "Actualizar" del admin (lectura forzada)
 async function loadTaken(){
-  const remote = await fbRead();
+  const remote = await fbReadOnce();
   if(remote && remote.taken){
     taken = remote.taken;
     try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(e){}
   } else {
-    // Fallback localStorage (sin Firebase configurado)
     try{ taken = JSON.parse(localStorage.getItem('rifa_blanca_taken') || '{}'); }catch(e){}
   }
-}
-
-function startPolling(){
-  // Refresca números cada 20 segundos
-  setInterval(async () => {
-    const remote = await fbRead();
-    if(remote && remote.taken){
-      taken = remote.taken;
-      try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(e){}
-      buildGrid();
-      if(adminOpen) renderParticipants();
-    }
-  }, 20000);
 }
 
 function getCfg(){
