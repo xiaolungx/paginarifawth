@@ -752,23 +752,16 @@ function switchTab(name){
 }
 
 // ════════════════════════════════════════
-//  FIREBASE — BASE DE DATOS (TIEMPO REAL)
-//  Solo necesitas UNA URL de Firebase.
-//  SSE mantiene conexión viva: cualquier
-//  cambio llega a TODOS los dispositivos
-//  en menos de 1 segundo automáticamente.
+//  FIREBASE — URL FIJA (todos los dispositivos)
 // ════════════════════════════════════════
-function getFirebaseURL(){
-  const raw = localStorage.getItem('rifa_blanca_firebase') || '';
-  return raw.replace(/\/+$/, '');
-}
+const FIREBASE_URL = 'https://rifacamisablk-default-rtdb.firebaseio.com';
 
-// ── Escribe objeto completo (usado por admin reset/manual) ──
+function getFirebaseURL(){ return FIREBASE_URL; }
+
+// Escribe objeto completo (admin reset/manual)
 async function fbWrite(data){
-  const url = getFirebaseURL();
-  if(!url) return false;
   try{
-    const res = await fetch(`${url}/rifa.json`, {
+    const res = await fetch(`${FIREBASE_URL}/rifa.json`, {
       method: 'PUT',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(data)
@@ -777,12 +770,10 @@ async function fbWrite(data){
   }catch(e){ return false; }
 }
 
-// ── Escribe solo los números nuevos sin borrar el resto ──
+// Escribe solo los números nuevos sin borrar el resto
 async function fbPatchTaken(updates){
-  const url = getFirebaseURL();
-  if(!url) return false;
   try{
-    const res = await fetch(`${url}/rifa/taken.json`, {
+    const res = await fetch(`${FIREBASE_URL}/rifa/taken.json`, {
       method: 'PATCH',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(updates)
@@ -791,12 +782,10 @@ async function fbPatchTaken(updates){
   }catch(e){ return false; }
 }
 
-// ── Lectura directa única (para el botón Actualizar del admin) ──
+// Lectura directa única (botón Actualizar del admin)
 async function fbReadOnce(){
-  const url = getFirebaseURL();
-  if(!url) return null;
   try{
-    const res = await fetch(`${url}/rifa.json`);
+    const res = await fetch(`${FIREBASE_URL}/rifa.json`);
     if(!res.ok) return null;
     return await res.json();
   }catch(e){ return null; }
@@ -807,97 +796,81 @@ async function testFirebase(){
   statusEl.style.display = 'block';
   statusEl.style.color = 'rgba(245,234,216,.5)';
   statusEl.textContent = '⏳ Probando conexión...';
-  const url = document.getElementById('cfg-firebase').value.trim();
-  if(!url){ statusEl.textContent = '⚠ Ingresa la URL primero'; statusEl.style.color = '#e74c3c'; return; }
   try{
-    const res = await fetch(`${url.replace(/\/+$/,'')}/rifa.json`);
+    const res = await fetch(`${FIREBASE_URL}/rifa.json`);
     if(res.ok){
-      statusEl.textContent = '✅ ¡Conexión exitosa! Firebase está funcionando.';
+      statusEl.textContent = '✅ ¡Conexión exitosa! Firebase funcionando.';
       statusEl.style.color = '#2ecc71';
     } else {
-      statusEl.textContent = '✕ Error: Verifica que la URL sea correcta y que el modo de prueba esté activo.';
+      statusEl.textContent = '✕ Error al conectar. Revisa las reglas de Firebase.';
       statusEl.style.color = '#e74c3c';
     }
   }catch(e){
-    statusEl.textContent = '✕ No se pudo conectar. Revisa la URL de Firebase.';
+    statusEl.textContent = '✕ No se pudo conectar.';
     statusEl.style.color = '#e74c3c';
   }
 }
 
 // ════════════════════════════════════════
 //  TIEMPO REAL — Firebase SSE
-//  EventSource = conexión persistente.
-//  Firebase empuja cada cambio en <1 seg
-//  a todos los dispositivos abiertos.
+//  Conexión persistente: cualquier cambio
+//  llega a TODOS los dispositivos en <1 seg
 // ════════════════════════════════════════
 let sseSource = null;
 
 function startRealtimeSync(){
-  const url = getFirebaseURL();
-  if(!url){
-    // Sin Firebase: usar localStorage como fallback
-    try{ taken = JSON.parse(localStorage.getItem('rifa_blanca_taken') || '{}'); }catch(e){}
-    buildGrid();
-    return;
-  }
-
   if(sseSource){ sseSource.close(); sseSource = null; }
 
-  // Firebase SSE: escucha /rifa/taken en tiempo real
-  sseSource = new EventSource(`${url}/rifa/taken.json`);
+  sseSource = new EventSource(`${FIREBASE_URL}/rifa/taken.json`);
 
-  // 'put' = carga inicial completa O reemplazo total
+  // 'put' = datos completos al conectar, o reemplazo total
   sseSource.addEventListener('put', e => {
     try{
       const payload = JSON.parse(e.data);
       if(payload.path === '/'){
         taken = payload.data || {};
       } else {
-        // cambio en una sola clave, ej: path="/5"
         const key = payload.path.replace(/^\//, '');
         if(payload.data === null) delete taken[key];
         else taken[key] = payload.data;
       }
-      try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(e){}
+      try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(_){}
       buildGrid();
       if(adminOpen){ renderParticipants(); buildManualGrid(); }
-    }catch(err){}
+    }catch(_){}
   });
 
-  // 'patch' = actualización parcial de varios campos a la vez
+  // 'patch' = actualización parcial
   sseSource.addEventListener('patch', e => {
     try{
       const payload = JSON.parse(e.data);
-      Object.entries(payload.data || {}).forEach(([k, v]) => {
-        if(v === null) delete taken[k];
-        else taken[k] = v;
+      Object.entries(payload.data || {}).forEach(([k,v]) => {
+        if(v === null) delete taken[k]; else taken[k] = v;
       });
-      try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(e){}
+      try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(_){}
       buildGrid();
       if(adminOpen){ renderParticipants(); buildManualGrid(); }
-    }catch(err){}
+    }catch(_){}
   });
-  // Si se cae la conexión, EventSource la reconecta solo
+  // Si se cae internet, EventSource reconecta solo
 }
 
 // ════════════════════════════════════════
 //  CARGA INICIAL
 // ════════════════════════════════════════
 function init(){
-  // SSE se suscribe y su primer evento 'put' ya carga los datos
-  // y llama buildGrid() solo. No necesitamos esperar un fetch previo.
-  startRealtimeSync();
+  startRealtimeSync(); // SSE carga los datos y llama buildGrid() solo
   initJerseyImage();
 }
 
-// Para el botón "Actualizar" del admin (lectura forzada)
+// Para el botón Actualizar del admin
 async function loadTaken(){
   const remote = await fbReadOnce();
   if(remote && remote.taken){
     taken = remote.taken;
-    try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(e){}
+    try{ localStorage.setItem('rifa_blanca_taken', JSON.stringify(taken)); }catch(_){}
   } else {
-    try{ taken = JSON.parse(localStorage.getItem('rifa_blanca_taken') || '{}'); }catch(e){}
+    try{ taken = JSON.parse(localStorage.getItem('rifa_blanca_taken') || '{}'); }catch(_){}
   }
 }
 
